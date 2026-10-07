@@ -78,6 +78,7 @@ import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-
 
 import {
 	cfgFeaturesUnexpectedStopDetection,
+	cfgFeaturesUnexpectedStopMaxRetries,
 	cfgModelLoopGuardEnabled,
 	cfgRetry,
 	cfgRetryEnabled,
@@ -88,7 +89,6 @@ import {
 } from "./settings";
 
 const THINKING_LOOP_REDIRECT_TYPE = "thinking-loop-redirect";
-const UNEXPECTED_STOP_MAX_RETRIES = 3;
 const UNEXPECTED_STOP_TIMEOUT_MS = 4000;
 const EMPTY_STOP_MAX_RETRIES = 3;
 const MALFORMED_FUNCTION_CALL_MAX_RETRIES = 3;
@@ -1090,7 +1090,7 @@ export class TurnRecovery {
 		}
 
 		this.#unexpectedStopRetryCount++;
-		if (this.#unexpectedStopRetryCount > UNEXPECTED_STOP_MAX_RETRIES) {
+		if (this.#unexpectedStopRetryCount > this.#unexpectedStopMaxRetries()) {
 			logger.warn("Assistant returned unexpected stop after retry cap", {
 				attempts: this.#unexpectedStopRetryCount - 1,
 				model: assistantMessage.model,
@@ -1112,11 +1112,14 @@ export class TurnRecovery {
 		});
 		return true;
 	}
+	#unexpectedStopMaxRetries(): number {
+		return Math.max(0, cfgFeaturesUnexpectedStopMaxRetries.get(this.#host.settings));
+	}
 
 	#unexpectedStopRetryReminder(): string {
 		return prompt.render(unexpectedStopRetryTemplate, {
 			retryCount: this.#unexpectedStopRetryCount,
-			maxRetries: UNEXPECTED_STOP_MAX_RETRIES,
+			maxRetries: this.#unexpectedStopMaxRetries(),
 		});
 	}
 
