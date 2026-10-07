@@ -1061,6 +1061,19 @@ export const cfgFeaturesUnexpectedStopMaxRetries = register({
 	},
 });
 
+export const cfgFeaturesTurnRecoveryMaxRetries = register({
+	id: "features.turnRecoveryMaxRetries",
+	type: "number",
+	default: 20,
+	ui: {
+		tab: "interaction",
+		group: "Agent",
+		label: "Turn Recovery Retries",
+		description:
+			"Shared retry cap for empty-stop, malformed-function-call, and stream-stall recovery injections. 0 disables them.",
+	},
+});
+
 export const cfgProvidersKimiApiFormat = register({
 	id: "providers.kimiApiFormat",
 	type: "enum",
