@@ -28,9 +28,46 @@ See [README](README.md#install) for Alpine/musl and Nix flake details.
 
 ## From a local clone
 
+### Automated script
+
+`scripts/install-local.sh` runs the whole chain and picks the mode with the
+`--mode` flag (`wrapper` by default):
+
+```sh
+scripts/install-local.sh                    # dev wrapper (default)
+scripts/install-local.sh --mode binary      # standalone binary
+```
+
+| Flag | Effect |
+| --- | --- |
+| `--mode wrapper\|binary` | Install mode; `wrapper` is the default. |
+| `--prefix DIR` | Binary mode only: install directory (default: Bun global bin). Ignored with a note in wrapper mode — `scripts/link-omp.sh` decides there. |
+| `--skip-deps` | Skip `bun install`. |
+| `--skip-native` | Skip `bun run build:native` (addon already built). |
+| `-h`, `--help` | Usage. |
+
+Both modes run `bun install`, then `bun run build:native` (the script aborts
+with instructions when `cargo`, `cmake`, or `ninja` is missing), then either the
+launcher link pair or the standalone build. Binary mode removes a pre-existing
+symlink at the target before installing, so it can replace a dev wrapper
+without clobbering the file the link points at. Either way the script finishes
+by running `<prefix>/omp --version` and warns when `omp` on `PATH` resolves
+elsewhere.
+
+Typical runs:
+
+```sh
+# First install, wrapper mode, addon not built yet
+scripts/install-local.sh
+
+# Rebuild only the binary after editing sources
+scripts/install-local.sh --mode binary --skip-deps --skip-native
+```
+
 ### Option A — dev wrapper (source-linked)
 
 The wrapper runs `src/cli.ts` directly, so edits are live with no rebuild.
+Automated: `scripts/install-local.sh` (the default mode).
 
 ```sh
 git clone https://github.com/can1357/oh-my-pi
@@ -60,6 +97,8 @@ sh scripts/link-omp.sh
 Re-run `bun run build:native` after touching Rust crates or `packages/natives`.
 
 ### Option B — standalone binary
+
+Automated: `scripts/install-local.sh --mode binary`.
 
 ```sh
 bun install
@@ -123,6 +162,10 @@ export PATH="$HOME/.local/opt/cmake-3.31.6-linux-x86_64/bin:$PATH"
 ```
 
 Then re-run `bun run build:native`.
+
+`scripts/install-local.sh` performs the same `cargo`/`cmake`/`ninja` check
+before building and aborts with this guidance; `--skip-native` bypasses both
+the check and the build.
 
 ### Native addon lacks the version stamp
 
