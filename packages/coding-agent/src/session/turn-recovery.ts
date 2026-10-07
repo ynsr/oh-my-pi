@@ -79,7 +79,9 @@ import { journalJudgmentUsage } from "../judgment";
 import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-stop-classifier";
 
 import {
+	cfgFeaturesTurnRecoveryMaxRetries,
 	cfgFeaturesUnexpectedStopDetection,
+	cfgFeaturesUnexpectedStopMaxRetries,
 	cfgModelLoopGuardEnabled,
 	cfgRetry,
 	cfgRetryEnabled,
@@ -90,15 +92,7 @@ import {
 } from "./settings";
 
 const THINKING_LOOP_REDIRECT_TYPE = "thinking-loop-redirect";
-const UNEXPECTED_STOP_MAX_RETRIES = 3;
-// Gateway-routed judges can take ~12s (observed: bifrost judge YES at 12.2s
-// while the client aborted at 4s, dropping the verdict and skipping the nudge).
-// Matches the 15s judgment-adjacent budgets (auth-gateway strict probe,
-// auto-graph pick) so a slow-but-healthy verdict still lands.
 const UNEXPECTED_STOP_TIMEOUT_MS = 15_000;
-const EMPTY_STOP_MAX_RETRIES = 3;
-const MALFORMED_FUNCTION_CALL_MAX_RETRIES = 3;
-const STREAM_STALL_CONTINUE_MAX_RETRIES = 3;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
 const NON_WHITESPACE_RE = /\S/;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
@@ -623,7 +617,7 @@ export class TurnRecovery {
 		if (this.#host.abortInProgress() || this.#host.isDisposed()) return false;
 
 		this.#malformedFunctionCallRetryCount++;
-		if (this.#malformedFunctionCallRetryCount > MALFORMED_FUNCTION_CALL_MAX_RETRIES) {
+		if (this.#malformedFunctionCallRetryCount > this.#turnRecoveryMaxRetries()) {
 			logger.warn("Assistant kept emitting malformed function calls after retry cap", {
 				attempts: this.#malformedFunctionCallRetryCount - 1,
 				model: message.model,
@@ -645,7 +639,7 @@ export class TurnRecovery {
 					type: "text",
 					text: prompt.render(malformedFunctionCallRetryTemplate, {
 						retryCount: this.#malformedFunctionCallRetryCount,
-						maxRetries: MALFORMED_FUNCTION_CALL_MAX_RETRIES,
+						maxRetries: this.#turnRecoveryMaxRetries(),
 					}),
 				},
 			],
@@ -693,7 +687,7 @@ export class TurnRecovery {
 		if (!hasText) return false;
 
 		this.#streamStallContinueCount++;
-		if (this.#streamStallContinueCount > STREAM_STALL_CONTINUE_MAX_RETRIES) {
+		if (this.#streamStallContinueCount > this.#turnRecoveryMaxRetries()) {
 			logger.warn("Stream kept stalling after committed text past retry cap", {
 				attempts: this.#streamStallContinueCount - 1,
 				model: message.model,
@@ -716,7 +710,7 @@ export class TurnRecovery {
 					type: "text",
 					text: prompt.render(streamStallContinueTemplate, {
 						retryCount: this.#streamStallContinueCount,
-						maxRetries: STREAM_STALL_CONTINUE_MAX_RETRIES,
+						maxRetries: this.#turnRecoveryMaxRetries(),
 					}),
 				},
 			],
@@ -1035,7 +1029,7 @@ export class TurnRecovery {
 		}
 
 		this.#emptyStopRetryCount++;
-		if (this.#emptyStopRetryCount > EMPTY_STOP_MAX_RETRIES) {
+		if (this.#emptyStopRetryCount > this.#turnRecoveryMaxRetries()) {
 			const attempts = this.#emptyStopRetryCount - 1;
 			const outputTokens = assistantMessage.usage.output;
 			const outputTokensExcludingKnownReasoning = Math.max(
@@ -1102,7 +1096,7 @@ export class TurnRecovery {
 	#emptyStopRetryReminder(): string {
 		return prompt.render(emptyStopRetryTemplate, {
 			retryCount: this.#emptyStopRetryCount,
-			maxRetries: EMPTY_STOP_MAX_RETRIES,
+			maxRetries: this.#turnRecoveryMaxRetries(),
 		});
 	}
 	async #handleUnexpectedAssistantStop(assistantMessage: AssistantMessage): Promise<boolean> {
@@ -1171,7 +1165,7 @@ export class TurnRecovery {
 		}
 
 		this.#unexpectedStopRetryCount++;
-		if (this.#unexpectedStopRetryCount > UNEXPECTED_STOP_MAX_RETRIES) {
+		if (this.#unexpectedStopRetryCount > this.#unexpectedStopMaxRetries()) {
 			logger.warn("Assistant returned unexpected stop after retry cap", {
 				attempts: this.#unexpectedStopRetryCount - 1,
 				model: assistantMessage.model,
@@ -1193,11 +1187,16 @@ export class TurnRecovery {
 		});
 		return true;
 	}
-
+	#unexpectedStopMaxRetries(): number {
+		return Math.max(0, cfgFeaturesUnexpectedStopMaxRetries.get(this.#host.settings));
+	}
+	#turnRecoveryMaxRetries(): number {
+		return Math.max(0, cfgFeaturesTurnRecoveryMaxRetries.get(this.#host.settings));
+	}
 	#unexpectedStopRetryReminder(): string {
 		return prompt.render(unexpectedStopRetryTemplate, {
 			retryCount: this.#unexpectedStopRetryCount,
-			maxRetries: UNEXPECTED_STOP_MAX_RETRIES,
+			maxRetries: this.#unexpectedStopMaxRetries(),
 		});
 	}
 
