@@ -127,6 +127,15 @@ const GENERIC_ABORT_MESSAGES: Record<string, true> = {
 function hasNonWhitespace(value: string): boolean {
 	return NON_WHITESPACE_RE.test(value);
 }
+/**
+ * A text turn ending here stopped mid-thought rather than finished: a trailing
+ * colon introduces content that never arrived, and a trailing ellipsis trails
+ * off into content that never arrived. Either is truncation, not completion.
+ */
+function hasTruncatedSuffix(value: string): boolean {
+	const trimmed = value.trimEnd();
+	return trimmed.endsWith(":") || trimmed.endsWith("...") || trimmed.endsWith("…");
+}
 
 function syntheticToolResultTailStart(messages: readonly AgentMessage[]): number {
 	let index = messages.length;
@@ -1079,10 +1088,14 @@ export class TurnRecovery {
 				this.#unexpectedStopRetryCount = 0;
 				return false;
 			}
-		} else if (mode === "mechanical") {
-			this.#unexpectedStopRetryCount = 0;
-			return false;
-		} else {
+		} else if (!hasTruncatedSuffix(text)) {
+			// Non-truncated text stops: mechanical never retries; smart consults
+			// the judge. Truncated stops (trailing colon/ellipsis) and
+			// thinking-only stops skip both and fall through to the nudge below.
+			if (mode === "mechanical") {
+				this.#unexpectedStopRetryCount = 0;
+				return false;
+			}
 			const controller = new AbortController();
 			const timeout = setTimeout(() => controller.abort(), this.#unexpectedStopJudgeTimeoutMs);
 			// Esc/session teardown must interrupt the extended judge wait: link the

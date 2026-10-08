@@ -211,6 +211,49 @@ describe("AgentSession unexpected stop guard", () => {
 		expect(mock.calls).toHaveLength(1);
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
 	});
+	it("nudges a text stop ending in a colon in mechanical mode without consulting the judge", async () => {
+		// A trailing colon means the message ended mid-thought: truncated, not done.
+		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(false);
+		const { session, mock } = await createHarness([
+			unexpectedStop("One clarification before I rewire — resetting `origin/main` is destructive:"),
+			{ content: ["proceeding with the rewire"], stopReason: "stop" },
+		]);
+		spy.mockResolvedValue(false);
+
+		await session.prompt("do the thing");
+		await session.waitForIdle();
+
+		expect(spy).not.toHaveBeenCalled();
+		expect(mock.calls).toHaveLength(2);
+		expect(assistantText(session.agent.state.messages)).toContain("proceeding with the rewire");
+		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
+	});
+	it("nudges a text stop ending in an ellipsis in smart mode without consulting the judge", async () => {
+		// Same truncation signal in smart mode: short-circuit before the judge
+		// so a slow gateway verdict and a wrong NO are both out of the picture.
+		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(false);
+		const { session, mock } = await createHarness(
+			[
+				unexpectedStop("Let me verify the build output first..."),
+				{ content: ["build is green"], stopReason: "stop" },
+			],
+			{
+				"features.unexpectedStopDetection": "smart",
+			},
+		);
+		spy.mockResolvedValue(false);
+
+		await session.prompt("do the thing");
+		await session.waitForIdle();
+
+		// The truncated stop must bypass the judge; the later terminal stop
+		// ("build is green") may still be classified normally.
+		expect(spy.mock.calls.map(call => call[0])).not.toContain("Let me verify the build output first...");
+		expect(spy).toHaveBeenCalledTimes(1);
+		expect(mock.calls).toHaveLength(2);
+		expect(assistantText(session.agent.state.messages)).toContain("build is green");
+		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
+	});
 
 	it("does not retry after a forced tool call", async () => {
 		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(true);

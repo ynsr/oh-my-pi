@@ -188,6 +188,52 @@ describe("classifyUnexpectedStop", () => {
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 		expect(completeSimpleMock).not.toHaveBeenCalled();
 	});
+	it("sends queued and deferred-action examples to the judge", async () => {
+		const jev = {
+			id: "jev-preview",
+			name: "JEV Preview",
+			api: "typesafe",
+			provider: "typesafe",
+			baseUrl: "https://judge.example.test/",
+			kind: "judge",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 4096,
+		} as Model<Api>;
+		const settings = Settings.isolated({ modelRoles: { judge: "typesafe/jev-preview" } });
+		const registry = makeRegistry([jev], { typesafe: "ts-key" });
+		let captured: { true?: unknown; false?: unknown } | undefined;
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async (_url, init) => {
+				const body = JSON.parse(String(init?.body)) as {
+					questions: Record<string, { criteria?: { true?: unknown; false?: unknown } }>;
+				};
+				captured = body.questions.stopped?.criteria;
+				return Response.json({
+					model: "jev-latest",
+					answers: { stopped: { type: "noul", noul: 0.9 } },
+					usage: { input_tokens: 10, output_tokens: 1 },
+				});
+			}),
+		);
+
+		const result = await classifyUnexpectedStop("Both queued: cmake first, then the fallback.", {
+			settings,
+			registry,
+			sessionId: "session-1",
+		});
+
+		expect(result).toBe(true);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		// Both observed false-NO patterns must reach the judge as examples:
+		// queued-but-nothing-ran claims, and deferred promises ending mid-thought.
+		expect(String(captured?.true)).toContain("queued");
+		expect(String(captured?.true)).toContain("before I rewire");
+		// The bare question must stay a NO example so genuine asks still pass.
+		expect(String(captured?.false)).toContain("Should I do that for you?");
+	});
 
 	it("returns undefined instead of throwing when every judge fails", async () => {
 		const settings = Settings.isolated({ modelRoles: { judge: "missing/judge" } });
