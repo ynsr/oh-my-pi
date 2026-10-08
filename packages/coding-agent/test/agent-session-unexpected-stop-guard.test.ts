@@ -386,7 +386,7 @@ describe("AgentSession unexpected stop guard", () => {
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
 	});
 	it("nudges a second turn when the verdict lands within the judge budget", async () => {
-		// The injected budget stands in for the 15s production default (which
+		// The injected budget stands in for the 60s production default (which
 		// would stall the suite); a verdict held only briefly must still nudge.
 		const release = Promise.withResolvers<boolean | undefined>();
 		let observedSignal: AbortSignal | undefined;
@@ -415,7 +415,7 @@ describe("AgentSession unexpected stop guard", () => {
 			}
 			expect(spy).toHaveBeenCalledTimes(1);
 			// A slow-but-within-budget verdict (12.2s in production against the
-			// 15s default): the judge wait must still be alive.
+			// 60s default): the judge wait must still be alive.
 			await Bun.sleep(200);
 			expect(observedSignal?.aborted).toBe(false);
 			// Later stops are terminal: only the slow verdict under test retries.

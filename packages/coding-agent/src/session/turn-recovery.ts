@@ -92,7 +92,11 @@ import {
 } from "./settings";
 
 const THINKING_LOOP_REDIRECT_TYPE = "thinking-loop-redirect";
-const UNEXPECTED_STOP_TIMEOUT_MS = 15_000;
+// Gateway-routed judges can take well past the old 4s budget (observed: judge
+// YES at 12.2s while the client aborted at 4s, dropping the verdict and
+// skipping the nudge). 60s keeps slow-but-healthy verdicts landing with
+// headroom; Esc still interrupts via the linked session abort signal.
+const UNEXPECTED_STOP_TIMEOUT_MS = 60_000;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
 const NON_WHITESPACE_RE = /\S/;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
@@ -289,7 +293,7 @@ export interface TurnRecoveryOptions {
 	/** Skip construction-time fallback-chain validation; the owner runs {@link TurnRecovery.validateRetryFallbackChains}. */
 	deferFallbackChainValidation?: boolean;
 	/**
-	 * Override for the unexpected-stop judge verdict budget (default 15s).
+	 * Override for the unexpected-stop judge verdict budget (default 60s).
 	 * Test seam so the slow-verdict boundary runs in milliseconds instead of
 	 * seconds; production never sets it.
 	 */
