@@ -6,6 +6,7 @@ import {
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import type {
+	AnthropicFallbackCreditHandle,
 	AssistantMessage,
 	AssistantRetryRecovery,
 	AssistantRetryRecoveryKind,
@@ -15,7 +16,6 @@ import type {
 	ModelUsageHealth,
 	TextContent,
 	ToolChoice,
-	AnthropicFallbackCreditHandle,
 } from "@oh-my-pi/pi-ai";
 import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
@@ -24,18 +24,6 @@ import { fallbackCreditTargets } from "@oh-my-pi/pi-catalog/compat/fallback-cred
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { isUnexpectedSocketCloseMessage, logger, prompt, sleepLong } from "@oh-my-pi/pi-utils";
-import type { ModelRegistry } from "../config/model-registry";
-import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
-
-import type { Settings } from "../config/settings";
-import type { RetryErrorUpdate } from "../extensibility/shared-events";
-import { isEvalStateContext } from "../eval/state";
-import emptyStopRetryTemplate from "../prompts/system/empty-stop-retry.md" with { type: "text" };
-import malformedFunctionCallRetryTemplate from "../prompts/system/malformed-function-call-retry.md" with { type: "text" };
-import streamStallContinueTemplate from "../prompts/system/stream-stall-continue.md" with { type: "text" };
-import thinkingLoopRedirectTemplate from "../prompts/system/thinking-loop-redirect.md" with { type: "text" };
-import unexpectedStopRetryTemplate from "../prompts/system/unexpected-stop-retry.md" with { type: "text" };
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -44,13 +32,25 @@ import {
 	resolveThinkingLevelForModel,
 } from "@oh-my-pi/pi-tui/thinking";
 import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
+import { isUnexpectedSocketCloseMessage, logger, prompt, sleepLong } from "@oh-my-pi/pi-utils";
+import type { ModelRegistry } from "../config/model-registry";
+import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
+import type { Settings } from "../config/settings";
+import { isEvalStateContext } from "../eval/state";
+import type { RetryErrorUpdate } from "../extensibility/shared-events";
+import { journalJudgmentUsage } from "../judgment";
+import emptyStopRetryTemplate from "../prompts/system/empty-stop-retry.md" with { type: "text" };
+import malformedFunctionCallRetryTemplate from "../prompts/system/malformed-function-call-retry.md" with { type: "text" };
+import streamStallContinueTemplate from "../prompts/system/stream-stall-continue.md" with { type: "text" };
+import thinkingLoopRedirectTemplate from "../prompts/system/thinking-loop-redirect.md" with { type: "text" };
+import unexpectedStopRetryTemplate from "../prompts/system/unexpected-stop-retry.md" with { type: "text" };
 import type { AgentSessionEvent } from "./agent-session-events";
-import type { ResetRecoveryResult } from "./codex-auto-reset";
 import type {
 	InitialRetryFallbackState,
 	UsageFallbackConfirmation,
 	UsageFallbackConfirmer,
 } from "./agent-session-types";
+import type { ResetRecoveryResult } from "./codex-auto-reset";
 import { assistantTurnProducedOutput, isEmptyAssistantStop, isEmptyErrorTurn, operatorTitleText } from "./messages";
 import {
 	type ActiveRetryFallbackState,
@@ -74,10 +74,6 @@ import { describeUsageFallback } from "./retry-fallback-reason";
 import { getLatestCompactionEntry } from "./session-context";
 import { EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
-import { sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
-import { journalJudgmentUsage } from "../judgment";
-import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-stop-classifier";
-
 import {
 	cfgFeaturesTurnRecoveryMaxRetries,
 	cfgFeaturesUnexpectedStopDetection,
@@ -90,6 +86,8 @@ import {
 	cfgRetryUsageReservePct,
 	cfgRetryUsageReservePolicy,
 } from "./settings";
+import { sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
+import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-stop-classifier";
 
 const THINKING_LOOP_REDIRECT_TYPE = "thinking-loop-redirect";
 // Gateway-routed judges can take well past the old 4s budget (observed: judge
@@ -126,6 +124,15 @@ const GENERIC_ABORT_MESSAGES: Record<string, true> = {
 
 function hasNonWhitespace(value: string): boolean {
 	return NON_WHITESPACE_RE.test(value);
+}
+/**
+ * A text turn ending here stopped mid-thought rather than finished: a trailing
+ * colon introduces content that never arrived, and a trailing ellipsis trails
+ * off into content that never arrived. Either is truncation, not completion.
+ */
+function hasTruncatedSuffix(value: string): boolean {
+	const trimmed = value.trimEnd();
+	return trimmed.endsWith(":") || trimmed.endsWith("...") || trimmed.endsWith("…");
 }
 
 /**
@@ -394,7 +401,12 @@ export class TurnRecovery {
 	#fallbackRoutedFor: string | undefined;
 	/** Memoized bootstrap answer, for the window before anything has served. */
 	#bootstrapCache:
-		| { model: Model; level: ThinkingLevel | undefined; routed: boolean; value: ServingModel }
+		| {
+				model: Model;
+				level: ThinkingLevel | undefined;
+				routed: boolean;
+				value: ServingModel;
+		  }
 		| undefined;
 	/**
 	 * Fallback-chain warnings pushed to `configWarnings` by startup validation,
@@ -473,7 +485,12 @@ export class TurnRecovery {
 			isFallback: this.#fallbackRouted,
 			contextWindow: model.contextWindow,
 		};
-		this.#bootstrapCache = { model, level, routed: this.#fallbackRouted, value };
+		this.#bootstrapCache = {
+			model,
+			level,
+			routed: this.#fallbackRouted,
+			value,
+		};
 		return value;
 	}
 
@@ -748,7 +765,11 @@ export class TurnRecovery {
 	runRecoveryCompactionWithRollback(
 		reason: "overflow" | "incomplete",
 		message: AssistantMessage,
-		options: { autoContinue: boolean; triggerContextTokens?: number; excludeMediaMethods?: boolean },
+		options: {
+			autoContinue: boolean;
+			triggerContextTokens?: number;
+			excludeMediaMethods?: boolean;
+		},
 	): Promise<RecoveryCompactionResult> {
 		return this.#runRecoveryCompactionWithRollback(reason, message, options);
 	}
@@ -858,7 +879,10 @@ export class TurnRecovery {
 	 */
 	async #closeRetrySaga(
 		end: RetrySagaEnd,
-		record: { terminalTurn?: AssistantMessage; retryErrors?: RetryErrorCompletion },
+		record: {
+			terminalTurn?: AssistantMessage;
+			retryErrors?: RetryErrorCompletion;
+		},
 	): Promise<void> {
 		let retryErrors: RetryErrorUpdate[] | undefined;
 		try {
@@ -933,7 +957,11 @@ export class TurnRecovery {
 	async #recordPendingRetryError(
 		message: AssistantMessage,
 		id: number,
-		options: { switchedCredential: boolean; switchedModel: boolean; delayMs: number },
+		options: {
+			switchedCredential: boolean;
+			switchedModel: boolean;
+			delayMs: number;
+		},
 	): Promise<void> {
 		await this.persistTerminalEmptyErrorTurn(message);
 		const persistenceKey = sessionMessagePersistenceKey(message);
@@ -1131,10 +1159,11 @@ export class TurnRecovery {
 
 		// A thinking-only terminal turn has no visible assistant message, so both
 		// mechanical and smart modes retry it directly, whether or not the provider
-		// exposed its reasoning text. Only a turn with visible text is gated on the
-		// mode and the judge. Tool-call turns never reach this path:
-		// isUnexpectedStopCandidate excludes them, including forced tools.
-		if (hasNonWhitespace(text)) {
+		// exposed its reasoning text. Only a non-truncated text turn is gated on the
+		// mode and the judge: a trailing colon/ellipsis ended mid-thought, so those
+		// skip both and fall through to the nudge below. Tool-call turns never reach
+		// this path: isUnexpectedStopCandidate excludes them, including forced tools.
+		if (hasNonWhitespace(text) && !hasTruncatedSuffix(text)) {
 			if (mode === "mechanical") {
 				this.#unexpectedStopRetryCount = 0;
 				return false;
@@ -1171,7 +1200,6 @@ export class TurnRecovery {
 				clearTimeout(timeout);
 				sessionSignal?.removeEventListener("abort", onSessionAbort);
 			}
-
 			// The classifier maps aborts to undefined (no-retry); a session abort
 			// during the wait must also skip the retry counter and the nudge.
 			if (classification !== true || sessionSignal?.aborted === true) {
@@ -1293,7 +1321,11 @@ export class TurnRecovery {
 	async #runRecoveryCompactionWithRollback(
 		reason: "overflow" | "incomplete",
 		assistantMessage: AssistantMessage,
-		options: { autoContinue: boolean; triggerContextTokens?: number; excludeMediaMethods?: boolean },
+		options: {
+			autoContinue: boolean;
+			triggerContextTokens?: number;
+			excludeMediaMethods?: boolean;
+		},
 	): Promise<RecoveryCompactionResult> {
 		const compactionEntryBefore = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
 		await this.dropPersistedAssistantTurn(assistantMessage);
@@ -1505,7 +1537,11 @@ export class TurnRecovery {
 		) {
 			return terminal();
 		}
-		return (await this.#handleRetryableError(message, { allowModelFallback: false })) ? "handled-retry" : terminal();
+		return (await this.#handleRetryableError(message, {
+			allowModelFallback: false,
+		}))
+			? "handled-retry"
+			: terminal();
 	}
 
 	/**
@@ -2069,7 +2105,10 @@ export class TurnRecovery {
 		}
 		if (!shouldFallback) {
 			// Auto thinking changes effort between turns, not the coding-plan quota.
-			this.#usageReserveApproval = { model: formatModelStringWithRouting(currentModel), sessionId };
+			this.#usageReserveApproval = {
+				model: formatModelStringWithRouting(currentModel),
+				sessionId,
+			};
 			return false;
 		}
 		this.#usageReserveApproval = undefined;
@@ -2123,7 +2162,12 @@ export class TurnRecovery {
 		role: string,
 		selector: RetryFallbackSelector,
 		currentSelector: string,
-		options?: { pinFallback?: boolean; apiKey?: string; signal?: AbortSignal; reason?: string },
+		options?: {
+			pinFallback?: boolean;
+			apiKey?: string;
+			signal?: AbortSignal;
+			reason?: string;
+		},
 	): Promise<boolean> {
 		const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 		const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
@@ -2528,7 +2572,11 @@ export class TurnRecovery {
 			// else would close it.
 			if (this.#retryPromise) {
 				await this.#closeRetrySaga(
-					{ success: false, attempt: this.#retryAttempt, finalError: message.errorMessage },
+					{
+						success: false,
+						attempt: this.#retryAttempt,
+						finalError: message.errorMessage,
+					},
 					{},
 				);
 			}
@@ -2868,7 +2916,11 @@ export class TurnRecovery {
 			// an announcement that never resolves.
 			if (this.#retryAttempt > 1) {
 				await this.#closeRetrySaga(
-					{ success: false, attempt: this.#retryAttempt - 1, finalError: errorMessage },
+					{
+						success: false,
+						attempt: this.#retryAttempt - 1,
+						finalError: errorMessage,
+					},
 					{ terminalTurn: message },
 				);
 			}
@@ -2889,7 +2941,11 @@ export class TurnRecovery {
 			// Same auto_retry_end backstop as the classifier-refusal branch above.
 			if (this.#retryAttempt > 1) {
 				await this.#closeRetrySaga(
-					{ success: false, attempt: this.#retryAttempt - 1, finalError: errorMessage },
+					{
+						success: false,
+						attempt: this.#retryAttempt - 1,
+						finalError: errorMessage,
+					},
 					{ terminalTurn: message },
 				);
 			}
@@ -2937,7 +2993,11 @@ export class TurnRecovery {
 			return false;
 		}
 
-		await this.#recordPendingRetryError(message, id, { switchedCredential, switchedModel, delayMs });
+		await this.#recordPendingRetryError(message, id, {
+			switchedCredential,
+			switchedModel,
+			delayMs,
+		});
 
 		await this.#host.emitSessionEvent({
 			type: "auto_retry_start",
@@ -3221,7 +3281,9 @@ export class TurnRecovery {
 			// A restored session already dropped the failed assistant turn (and its
 			// paired synthetic tool results) from provider context, so the persisted
 			// display transcript is the source of truth for a retryable failed tail.
-			const transcriptMessages = this.#host.sessionManager.buildSessionContext({ transcript: true }).messages;
+			const transcriptMessages = this.#host.sessionManager.buildSessionContext({
+				transcript: true,
+			}).messages;
 			if (retryableAssistantTurnEnd(transcriptMessages) === undefined) return false;
 			// The boundary is already gone from active context; when the intact
 			// failed batch is still the tail, replay the tools directly.
