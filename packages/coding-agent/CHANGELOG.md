@@ -273,6 +273,7 @@
 - `omp update` and the startup update notice leave an omp installed by another app (Tern) to that app instead of replacing its files.
 - The startup update notice no longer appears when omp runs from a source checkout.
 - Fixed smart unexpected-stop detection missing slow judge verdicts so premature stops resume instead of stalling ([#14993](https://github.com/can1357/oh-my-pi/pull/14993) by [@YounesRahimi](https://github.com/YounesRahimi)).
+- Fixed unexpected-stop detection nudging truncated stops directly and recognizing queued or deferred-action promises as premature stops ([#14993](https://github.com/can1357/oh-my-pi/pull/14993) by [@YounesRahimi](https://github.com/YounesRahimi)).
 
 ### Fixed
 
