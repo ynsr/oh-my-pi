@@ -331,10 +331,22 @@ fi
 
 if [ "$NO_PUSH" -eq 0 ] && [ "$PUSHED" -eq 0 ] \
 	&& git show-ref --verify --quiet "refs/remotes/origin/$BRANCH" \
-	&& [ "$(git rev-parse "origin/$BRANCH")" != "$(git rev-parse HEAD)" ] \
-	&& git merge-base --is-ancestor "origin/$BRANCH" HEAD; then
-	step "push $BRANCH to origin (updates fork)"
-	git push origin "$BRANCH"
+	&& [ "$(git rev-parse "origin/$BRANCH")" != "$(git rev-parse HEAD)" ]; then
+	if git merge-base --is-ancestor "origin/$BRANCH" HEAD; then
+		step "push $BRANCH to origin (updates fork)"
+		git push origin "$BRANCH"
+	elif git merge-base --is-ancestor "$UPSTREAM_REF" HEAD \
+		&& OLD_BASE=$(git merge-base "origin/$BRANCH" "$UPSTREAM_REF") \
+		&& [ -n "$OLD_BASE" ] \
+		&& diff <(git diff -U0 --no-color --no-ext-diff "$OLD_BASE" "$UPSTREAM_REF" | grep -v '^index \|^@@ ') \
+			<(git diff -U0 --no-color --no-ext-diff "origin/$BRANCH" HEAD | grep -v '^index \|^@@ ') >/dev/null; then
+		# Stale remote from an earlier rebase whose push never landed:
+		# the origin→HEAD change equals the old-base→upstream change
+		# (modulo hunk headers), so force-push loses no fork content.
+		step "push $BRANCH to origin (rebased, remote stale)"
+		git push --force-with-lease origin "$BRANCH"
+		PUSHED=1
+	fi
 fi
 
 # Push-then-reset: dev is safe on origin before origin/main is mirrored.
