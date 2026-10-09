@@ -5,6 +5,12 @@
 ### Changed
 
 - Reduced memory retained after merging unchanged discovered and cached models ([#14252](https://github.com/can1357/oh-my-pi/pull/14252) by [@iliaal](https://github.com/iliaal)).
+- Fixed smart unexpected-stop detection missing slow judge verdicts so premature stops resume instead of stalling ([#14993](https://github.com/can1357/oh-my-pi/pull/14993) by [@YounesRahimi](https://github.com/YounesRahimi)).
+- Fixed unexpected-stop detection nudging truncated stops directly and recognizing queued or deferred-action promises as premature stops ([#14993](https://github.com/can1357/oh-my-pi/pull/14993) by [@YounesRahimi](https://github.com/YounesRahimi)).
+
+### Fixed
+
+- Reduced memory growth after one-shot side requests without interrupting ongoing conversations ([#14334](https://github.com/can1357/oh-my-pi/pull/14334) by [@iliaal](https://github.com/iliaal)).
 
 ## [18.8.6] - 2026-10-08
 

@@ -77,7 +77,9 @@ import { journalJudgmentUsage } from "../judgment";
 import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-stop-classifier";
 
 import {
+	cfgFeaturesTurnRecoveryMaxRetries,
 	cfgFeaturesUnexpectedStopDetection,
+	cfgFeaturesUnexpectedStopMaxRetries,
 	cfgModelLoopGuardEnabled,
 	cfgRetry,
 	cfgRetryEnabled,
@@ -88,11 +90,11 @@ import {
 } from "./settings";
 
 const THINKING_LOOP_REDIRECT_TYPE = "thinking-loop-redirect";
-const UNEXPECTED_STOP_MAX_RETRIES = 3;
-const UNEXPECTED_STOP_TIMEOUT_MS = 4000;
-const EMPTY_STOP_MAX_RETRIES = 3;
-const MALFORMED_FUNCTION_CALL_MAX_RETRIES = 3;
-const STREAM_STALL_CONTINUE_MAX_RETRIES = 3;
+// Gateway-routed judges can take well past the old 4s budget (observed: judge
+// YES at 12.2s while the client aborted at 4s, dropping the verdict and
+// skipping the nudge). 60s keeps slow-but-healthy verdicts landing with
+// headroom; Esc still interrupts via the linked session abort signal.
+const UNEXPECTED_STOP_TIMEOUT_MS = 60_000;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
 const NON_WHITESPACE_RE = /\S/;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
@@ -124,6 +126,15 @@ const GENERIC_ABORT_MESSAGES: Record<string, true> = {
 
 function hasNonWhitespace(value: string): boolean {
 	return NON_WHITESPACE_RE.test(value);
+}
+/**
+ * A text turn ending here stopped mid-thought rather than finished: a trailing
+ * colon introduces content that never arrived, and a trailing ellipsis trails
+ * off into content that never arrived. Either is truncation, not completion.
+ */
+function hasTruncatedSuffix(value: string): boolean {
+	const trimmed = value.trimEnd();
+	return trimmed.endsWith(":") || trimmed.endsWith("...") || trimmed.endsWith("…");
 }
 
 function syntheticToolResultTailStart(messages: readonly AgentMessage[]): number {
@@ -231,6 +242,14 @@ export interface TurnRecoveryHost {
 	streamingEditAbortTriggered(): boolean;
 	promptGeneration(): number;
 	promptSequence(): number;
+	/**
+	 * Live post-prompt abort signal; aborted when the user interrupts (Esc),
+	 * the turn is superseded, or the session is torn down. The unexpected-stop
+	 * judge wait links its timeout to this signal so a slow verdict never
+	 * blocks the abort drain. Optional so partial test stubs that never reach
+	 * the judge path need not provide it.
+	 */
+	unexpectedStopAbortSignal?(): AbortSignal;
 	sessionId(): string;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	scheduleAgentContinue(options: {
@@ -280,6 +299,12 @@ export interface TurnRecoveryOptions {
 	initialRetryFallback?: InitialRetryFallbackState;
 	/** Skip construction-time fallback-chain validation; the owner runs {@link TurnRecovery.validateRetryFallbackChains}. */
 	deferFallbackChainValidation?: boolean;
+	/**
+	 * Override for the unexpected-stop judge verdict budget (default 60s).
+	 * Test seam so the slow-verdict boundary runs in milliseconds instead of
+	 * seconds; production never sets it.
+	 */
+	unexpectedStopJudgeTimeoutMs?: number;
 }
 
 type PendingRetryError = {
@@ -303,6 +328,7 @@ type UsageLimitOutcome = {
 /** Owns terminal-stop recovery, automatic retries, and fallback routing. */
 export class TurnRecovery {
 	readonly #host: TurnRecoveryHost;
+	readonly #unexpectedStopJudgeTimeoutMs: number;
 	#retryAbortController: AbortController | undefined;
 	#retryAttempt = 0;
 	#requestBodyReadTimeoutRecoveryPromptSequence: number | undefined;
@@ -361,6 +387,7 @@ export class TurnRecovery {
 
 	constructor(host: TurnRecoveryHost, options: TurnRecoveryOptions = {}) {
 		this.#host = host;
+		this.#unexpectedStopJudgeTimeoutMs = options.unexpectedStopJudgeTimeoutMs ?? UNEXPECTED_STOP_TIMEOUT_MS;
 		if (options.initialRetryFallback) {
 			this.#activeRetryFallback = {
 				...options.initialRetryFallback,
@@ -584,7 +611,7 @@ export class TurnRecovery {
 		if (this.#host.abortInProgress() || this.#host.isDisposed()) return false;
 
 		this.#malformedFunctionCallRetryCount++;
-		if (this.#malformedFunctionCallRetryCount > MALFORMED_FUNCTION_CALL_MAX_RETRIES) {
+		if (this.#malformedFunctionCallRetryCount > this.#turnRecoveryMaxRetries()) {
 			logger.warn("Assistant kept emitting malformed function calls after retry cap", {
 				attempts: this.#malformedFunctionCallRetryCount - 1,
 				model: message.model,
@@ -606,7 +633,7 @@ export class TurnRecovery {
 					type: "text",
 					text: prompt.render(malformedFunctionCallRetryTemplate, {
 						retryCount: this.#malformedFunctionCallRetryCount,
-						maxRetries: MALFORMED_FUNCTION_CALL_MAX_RETRIES,
+						maxRetries: this.#turnRecoveryMaxRetries(),
 					}),
 				},
 			],
@@ -654,7 +681,7 @@ export class TurnRecovery {
 		if (!hasText) return false;
 
 		this.#streamStallContinueCount++;
-		if (this.#streamStallContinueCount > STREAM_STALL_CONTINUE_MAX_RETRIES) {
+		if (this.#streamStallContinueCount > this.#turnRecoveryMaxRetries()) {
 			logger.warn("Stream kept stalling after committed text past retry cap", {
 				attempts: this.#streamStallContinueCount - 1,
 				model: message.model,
@@ -677,7 +704,7 @@ export class TurnRecovery {
 					type: "text",
 					text: prompt.render(streamStallContinueTemplate, {
 						retryCount: this.#streamStallContinueCount,
-						maxRetries: STREAM_STALL_CONTINUE_MAX_RETRIES,
+						maxRetries: this.#turnRecoveryMaxRetries(),
 					}),
 				},
 			],
@@ -963,7 +990,7 @@ export class TurnRecovery {
 		}
 
 		this.#emptyStopRetryCount++;
-		if (this.#emptyStopRetryCount > EMPTY_STOP_MAX_RETRIES) {
+		if (this.#emptyStopRetryCount > this.#turnRecoveryMaxRetries()) {
 			const attempts = this.#emptyStopRetryCount - 1;
 			const outputTokens = assistantMessage.usage.output;
 			const outputTokensExcludingKnownReasoning = Math.max(
@@ -1030,7 +1057,7 @@ export class TurnRecovery {
 	#emptyStopRetryReminder(): string {
 		return prompt.render(emptyStopRetryTemplate, {
 			retryCount: this.#emptyStopRetryCount,
-			maxRetries: EMPTY_STOP_MAX_RETRIES,
+			maxRetries: this.#turnRecoveryMaxRetries(),
 		});
 	}
 	async #handleUnexpectedAssistantStop(assistantMessage: AssistantMessage): Promise<boolean> {
@@ -1061,12 +1088,22 @@ export class TurnRecovery {
 				this.#unexpectedStopRetryCount = 0;
 				return false;
 			}
-		} else if (mode === "mechanical") {
-			this.#unexpectedStopRetryCount = 0;
-			return false;
-		} else {
+		} else if (!hasTruncatedSuffix(text)) {
+			// Non-truncated text stops: mechanical never retries; smart consults
+			// the judge. Truncated stops (trailing colon/ellipsis) and
+			// thinking-only stops skip both and fall through to the nudge below.
+			if (mode === "mechanical") {
+				this.#unexpectedStopRetryCount = 0;
+				return false;
+			}
 			const controller = new AbortController();
-			const timeout = setTimeout(() => controller.abort(), UNEXPECTED_STOP_TIMEOUT_MS);
+			const timeout = setTimeout(() => controller.abort(), this.#unexpectedStopJudgeTimeoutMs);
+			// Esc/session teardown must interrupt the extended judge wait: link the
+			// live session abort so abort() drains agent_end maintenance instead of
+			// blocking on a verdict the user no longer wants.
+			const sessionSignal = this.#host.unexpectedStopAbortSignal?.();
+			const onSessionAbort = (): void => controller.abort();
+			sessionSignal?.addEventListener("abort", onSessionAbort, { once: true });
 			let classification: boolean | undefined;
 			try {
 				classification = await classifyUnexpectedStop(text, {
@@ -1081,16 +1118,19 @@ export class TurnRecovery {
 				});
 			} finally {
 				clearTimeout(timeout);
+				sessionSignal?.removeEventListener("abort", onSessionAbort);
 			}
 
-			if (classification !== true) {
+			// The classifier maps aborts to undefined (no-retry); a session abort
+			// during the wait must also skip the retry counter and the nudge.
+			if (classification !== true || sessionSignal?.aborted === true) {
 				this.#unexpectedStopRetryCount = 0;
 				return false;
 			}
 		}
 
 		this.#unexpectedStopRetryCount++;
-		if (this.#unexpectedStopRetryCount > UNEXPECTED_STOP_MAX_RETRIES) {
+		if (this.#unexpectedStopRetryCount > this.#unexpectedStopMaxRetries()) {
 			logger.warn("Assistant returned unexpected stop after retry cap", {
 				attempts: this.#unexpectedStopRetryCount - 1,
 				model: assistantMessage.model,
@@ -1112,11 +1152,16 @@ export class TurnRecovery {
 		});
 		return true;
 	}
-
+	#unexpectedStopMaxRetries(): number {
+		return Math.max(0, cfgFeaturesUnexpectedStopMaxRetries.get(this.#host.settings));
+	}
+	#turnRecoveryMaxRetries(): number {
+		return Math.max(0, cfgFeaturesTurnRecoveryMaxRetries.get(this.#host.settings));
+	}
 	#unexpectedStopRetryReminder(): string {
 		return prompt.render(unexpectedStopRetryTemplate, {
 			retryCount: this.#unexpectedStopRetryCount,
-			maxRetries: UNEXPECTED_STOP_MAX_RETRIES,
+			maxRetries: this.#unexpectedStopMaxRetries(),
 		});
 	}
 
