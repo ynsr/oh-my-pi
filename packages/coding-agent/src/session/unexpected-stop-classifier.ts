@@ -24,8 +24,8 @@ const UNEXPECTED_STOP_QUESTION: NoulQuestion = {
 	instructions:
 		"Classify whether this assistant message is an unexpected stop: it says it will act, continue working, or call a tool, then ends without doing so.",
 	criteria: {
-		true: 'Unexpected stops:\n- "I should do the same for the JS eval worker. Doing that now."\n- "Let me run the tests next."\n- "I\'ll fix that now."\n- "Should I do that for you?"',
-		false: 'Not an unexpected stop:\n- "I\'ve completed the task."\n- "Is there anything else I can help with?"\n- "The fix is done and tests pass."',
+		true: 'Unexpected stops (promises future work, then ends):\n- "I should do the same for the JS eval worker. Doing that now."\n- "Let me run the tests next."\n- "I\'ll fix that now."\n- "Both queued: cmake first, then the fallback." (queued, nothing ran)\n- "One clarification before I rewire — resetting origin/main is destructive:" (defers action, ends mid-thought)',
+		false: 'Not an unexpected stop (done, or asking with no promised action):\n- "I\'ve completed the task."\n- "Is there anything else I can help with?"\n- "The fix is done and tests pass."\n- "Should I do that for you?"',
 	},
 };
 
