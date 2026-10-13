@@ -265,10 +265,21 @@ resolve_conflict_ai() {
 	# resolve_conflict_ai <upstream-ref>: the rebase is paused with markers
 	# in the worktree. Ask the omp agent to resolve, stage, and continue.
 	# Returns 0 only if the rebase completes with a clean tree.
-	local ref="$1" files prompt
+	#
+	# The worktree's omp launcher runs repo sources directly, so it crashes
+	# on conflict markers in files it imports. Build a standalone binary
+	# BEFORE the rebase starts (see below) and prefer it here.
+	local ref="$1" files prompt omp_bin
 	files=$(git diff --name-only --diff-filter=U || true)
 	[ -n "$files" ] || return 1
-	command -v omp >/dev/null 2>&1 || return 1
+	omp_bin=""
+	if [ -n "${OMP_RESOLVE_BIN-}" ] && [ -x "$OMP_RESOLVE_BIN" ]; then
+		omp_bin="$OMP_RESOLVE_BIN"
+	elif command -v omp >/dev/null 2>&1 && omp --version >/dev/null 2>&1; then
+		omp_bin="omp"
+	else
+		return 1
+	fi
 	prompt="You are resolving a git rebase conflict in $REPO_ROOT.
 Rebase of $BRANCH onto $ref is paused. Conflicted files:
 $files
@@ -281,7 +292,7 @@ Rules:
 5. When every conflicted file is staged and marker-free, run \`git rebase --continue\`. If further conflicts appear in later commits, repeat.
 6. If a commit is fully obsolete (upstream supersedes it), run \`git rebase --skip\` for that step.
 7. Verify with \`git status\` and \`git diff --check\` before continuing past each step."
-	if omp --auto-approve -p "$prompt"; then
+	if "$omp_bin" --auto-approve -p "$prompt"; then
 		! git rev-parse --verify --quiet REBASE_HEAD >/dev/null \
 			&& [ -z "$(git diff --name-only --diff-filter=U || true)" ] \
 			&& [ -z "$(git status --porcelain)" ]
@@ -291,6 +302,20 @@ Rules:
 }
 
 if [ "$NO_SYNC" -eq 0 ]; then
+	# --resolve-ai needs a working omp while the worktree has conflict
+	# markers (the dev launcher imports repo sources, so it crashes there).
+	# Prebuild a standalone binary from the pre-rebase tree; the resolver
+	# prefers it via OMP_RESOLVE_BIN. Best-effort: without it, resolution
+	# falls back to `omp` on PATH and its own health check.
+	OMP_RESOLVE_BIN=""
+	if [ "$RESOLVE_AI" -eq 1 ]; then
+		if (cd packages/coding-agent && bun run build >/dev/null 2>&1) \
+			&& [ -f "$REPO_ROOT/packages/coding-agent/dist/omp" ]; then
+			OMP_RESOLVE_BIN="$REPO_ROOT/packages/coding-agent/dist/omp"
+		else
+			printf 'warning: resolver binary build failed; falling back to `omp` on PATH\n' >&2
+		fi
+	fi
 	step "rebase $BRANCH onto $UPSTREAM_REF"
 	BEFORE=$(git rev-parse HEAD)
 	if git rebase "$UPSTREAM_REF"; then
