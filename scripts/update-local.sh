@@ -2,7 +2,7 @@
 # Update omp from a local checkout.
 #
 #   scripts/update-local.sh [--allow-dirty] [--no-sync] [--no-push]
-#                           [--force-reset] [--resolve-ai] [branch]
+#                           [--force-reset] [--resolve-ai] [--rebuild-resolver] [branch]
 #                           [-- install-local args...]
 #
 # Upstream (can1357/oh-my-pi) is always read from its `main` branch.
@@ -31,13 +31,14 @@ UPSTREAM_URL="https://github.com/can1357/oh-my-pi.git"
 UPSTREAM_BRANCH="main"
 FORCE_RESET=0
 RESOLVE_AI=0
+REBUILD_RESOLVER=0
 NO_SYNC=0
 NO_PUSH=0
 
 usage() {
 	cat <<'EOF'
 Usage: update-local.sh [--allow-dirty] [--no-sync] [--no-push]
-                       [--force-reset] [--resolve-ai]
+                       [--force-reset] [--resolve-ai] [--rebuild-resolver]
                        [--upstream-remote NAME] [--upstream-url URL]
                        [--upstream-branch NAME]
                        [branch] [-- install-local args...]
@@ -53,7 +54,9 @@ Usage: update-local.sh [--allow-dirty] [--no-sync] [--no-push]
   --resolve-ai      on rebase conflict, ask `omp --auto-approve -p` to
                     resolve markers in place; on agent failure, abort and
                     print manual recovery steps (default: abort immediately)
-  --upstream-remote remote name for can1357/oh-my-pi (default: upstream)
+  --rebuild-resolver  rebuild the standalone resolver binary from the
+                    pre-rebase tree instead of reusing dist/omp (which may
+                    be stale); only meaningful with --resolve-ai
   --upstream-url    URL used when adding the upstream remote
                     (default: https://github.com/can1357/oh-my-pi.git)
   --upstream-branch upstream branch to sync from (default: main)
@@ -88,6 +91,10 @@ while [ $# -gt 0 ]; do
 			;;
 		--resolve-ai)
 			RESOLVE_AI=1
+			shift
+			;;
+		--rebuild-resolver)
+			REBUILD_RESOLVER=1
 			shift
 			;;
 		--upstream-remote)
@@ -304,16 +311,27 @@ Rules:
 if [ "$NO_SYNC" -eq 0 ]; then
 	# --resolve-ai needs a working omp while the worktree has conflict
 	# markers (the dev launcher imports repo sources, so it crashes there).
-	# Prebuild a standalone binary from the pre-rebase tree; the resolver
-	# prefers it via OMP_RESOLVE_BIN. Best-effort: without it, resolution
-	# falls back to `omp` on PATH and its own health check.
+	# Reuse the existing standalone binary when it is healthy; otherwise
+	# build one from the pre-rebase tree. --rebuild-resolver forces a fresh
+	# build. The resolver prefers the binary via OMP_RESOLVE_BIN.
+	# Best-effort: without it, resolution falls back to `omp` on PATH and
+	# its own health check.
 	OMP_RESOLVE_BIN=""
 	if [ "$RESOLVE_AI" -eq 1 ]; then
-		if (cd packages/coding-agent && bun run build >/dev/null 2>&1) \
-			&& [ -f "$REPO_ROOT/packages/coding-agent/dist/omp" ]; then
-			OMP_RESOLVE_BIN="$REPO_ROOT/packages/coding-agent/dist/omp"
+		RESOLVER_BIN="$REPO_ROOT/packages/coding-agent/dist/omp"
+		if [ "$REBUILD_RESOLVER" -eq 0 ] && [ -x "$RESOLVER_BIN" ] \
+			&& "$RESOLVER_BIN" --version >/dev/null 2>&1; then
+			OMP_RESOLVE_BIN="$RESOLVER_BIN"
+			resolver_version=$("$RESOLVER_BIN" --version 2>/dev/null | head -n 1)
+			tree_version="omp/$(bun -e 'console.log(JSON.parse(await Bun.file("packages/coding-agent/package.json").text()).version)' 2>/dev/null || true)"
+			if [ -n "$tree_version" ] && [ "$resolver_version" != "$tree_version" ]; then
+				printf 'warning: resolver binary is %s but tree is %s; re-run with --rebuild-resolver for a fresh build\n' "$resolver_version" "$tree_version" >&2
+			fi
+		elif (cd packages/coding-agent && bun run build >/dev/null 2>&1) \
+			&& [ -f "$RESOLVER_BIN" ]; then
+			OMP_RESOLVE_BIN="$RESOLVER_BIN"
 		else
-			printf 'warning: resolver binary build failed; falling back to `omp` on PATH\n' >&2
+			printf 'warning: resolver binary missing and build failed; falling back to `omp` on PATH\n' >&2
 		fi
 	fi
 	step "rebase $BRANCH onto $UPSTREAM_REF"
