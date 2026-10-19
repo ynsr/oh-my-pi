@@ -298,7 +298,8 @@ Rules:
 4. NEVER leave conflict markers. NEVER commit — only resolve files and \`git add\` them.
 5. When every conflicted file is staged and marker-free, run \`git rebase --continue\`. If further conflicts appear in later commits, repeat.
 6. If a commit is fully obsolete (upstream supersedes it), run \`git rebase --skip\` for that step.
-7. Verify with \`git status\` and \`git diff --check\` before continuing past each step."
+7. Format touched TypeScript with \`bunx oxfmt --write <files>\` (repo config is .oxfmtrc.json) — NEVER \`bunx biome\`, which uses the wrong line width and rewrites whole files. Then typecheck with \`bun check <files>\` from packages/coding-agent.
+8. Verify with \`git status\` and \`git diff --check\` before continuing past each step."
 	if "$omp_bin" --auto-approve -p "$prompt"; then
 		! git rev-parse --verify --quiet REBASE_HEAD >/dev/null \
 			&& [ -z "$(git diff --name-only --diff-filter=U || true)" ] \
