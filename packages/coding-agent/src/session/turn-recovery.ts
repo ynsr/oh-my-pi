@@ -75,9 +75,7 @@ import { getLatestCompactionEntry } from "./session-context";
 import { EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 import {
-	cfgFeaturesTurnRecoveryMaxRetries,
 	cfgFeaturesUnexpectedStopDetection,
-	cfgFeaturesUnexpectedStopMaxRetries,
 	cfgModelLoopGuardEnabled,
 	cfgRetry,
 	cfgRetryEnabled,
@@ -86,15 +84,20 @@ import {
 	cfgRetryUsageReservePct,
 	cfgRetryUsageReservePolicy,
 } from "./settings";
+import {
+	FORK_UNEXPECTED_STOP_TIMEOUT_MS,
+	forkHasTruncatedSuffix,
+	forkTurnRecoveryMaxRetries,
+	forkUnexpectedStopMaxRetries,
+} from "./turn-recovery-fork";
 import { sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-stop-classifier";
 
 const THINKING_LOOP_REDIRECT_TYPE = "thinking-loop-redirect";
-// Gateway-routed judges can take well past the old 4s budget (observed: judge
-// YES at 12.2s while the client aborted at 4s, dropping the verdict and
-// skipping the nudge). 60s keeps slow-but-healthy verdicts landing with
-// headroom; Esc still interrupts via the linked session abort signal.
-const UNEXPECTED_STOP_TIMEOUT_MS = 60_000;
+// Fork: 60s judge verdict budget (upstream: 15s) — gateway-routed judges can
+// take well past the old 4s budget (observed YES at 12.2s). Esc still
+// interrupts via the linked session abort signal. See ./turn-recovery-fork.ts.
+const UNEXPECTED_STOP_TIMEOUT_MS = FORK_UNEXPECTED_STOP_TIMEOUT_MS;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
 const NON_WHITESPACE_RE = /\S/;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
@@ -124,15 +127,6 @@ const GENERIC_ABORT_MESSAGES: Record<string, true> = {
 
 function hasNonWhitespace(value: string): boolean {
 	return NON_WHITESPACE_RE.test(value);
-}
-/**
- * A text turn ending here stopped mid-thought rather than finished: a trailing
- * colon introduces content that never arrived, and a trailing ellipsis trails
- * off into content that never arrived. Either is truncation, not completion.
- */
-function hasTruncatedSuffix(value: string): boolean {
-	const trimmed = value.trimEnd();
-	return trimmed.endsWith(":") || trimmed.endsWith("...") || trimmed.endsWith("…");
 }
 
 /**
@@ -1163,7 +1157,7 @@ export class TurnRecovery {
 		// mode and the judge: a trailing colon/ellipsis ended mid-thought, so those
 		// skip both and fall through to the nudge below. Tool-call turns never reach
 		// this path: isUnexpectedStopCandidate excludes them, including forced tools.
-		if (hasNonWhitespace(text) && !hasTruncatedSuffix(text)) {
+		if (hasNonWhitespace(text) && !forkHasTruncatedSuffix(text)) {
 			if (mode === "mechanical") {
 				this.#unexpectedStopRetryCount = 0;
 				return false;
@@ -1243,10 +1237,10 @@ export class TurnRecovery {
 	}
 
 	#unexpectedStopMaxRetries(): number {
-		return Math.max(0, cfgFeaturesUnexpectedStopMaxRetries.get(this.#host.settings));
+		return forkUnexpectedStopMaxRetries(this.#host.settings);
 	}
 	#turnRecoveryMaxRetries(): number {
-		return Math.max(0, cfgFeaturesTurnRecoveryMaxRetries.get(this.#host.settings));
+		return forkTurnRecoveryMaxRetries(this.#host.settings);
 	}
 	#unexpectedStopRetryReminder(): string {
 		return prompt.render(unexpectedStopRetryTemplate, {
