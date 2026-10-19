@@ -26,7 +26,7 @@ import {
 	renderJsonTreeLines,
 } from "./json-tree";
 import { formatStyledTruncationWarning, stripOutputNotice } from "./output-meta";
-import { formatExpandHint, truncateToWidth } from "../render/render-utils";
+import { clipCollapsed, formatExpandHint } from "../render/render-utils";
 import { formatOutputPaneLines, styleToolOutputLine } from "../render/output-pane";
 import type { StatusLineOptions } from "../render/status-line";
 import { plainToolCard, type ToolCardPhase } from "../render/tool-card";
@@ -121,7 +121,15 @@ function renderMarkdownMCPResult(
 				applyBg: false,
 			};
 		},
-		{ paddingX: 0, paddingY: 0, onInvalidate: () => (bodyMemo = undefined) },
+		{
+			paddingX: 0,
+			paddingY: 0,
+			onInvalidate: () => (bodyMemo = undefined),
+			onReleaseRenderCaches: () => {
+				bodyMemo = undefined;
+				markdown.releaseRenderCaches();
+			},
+		},
 	);
 }
 
@@ -208,7 +216,12 @@ export function renderMCPResult(
 			}
 			return { status, phase, body: bodyMemo.lines, applyBg: false };
 		},
-		{ paddingX: 0, paddingY: 0, onInvalidate: () => (bodyMemo = undefined) },
+		{
+			paddingX: 0,
+			paddingY: 0,
+			onInvalidate: () => (bodyMemo = undefined),
+			onReleaseRenderCaches: () => (bodyMemo = undefined),
+		},
 	);
 
 	function buildMcpResultBody(contentWidth: number): string[] {
@@ -254,7 +267,7 @@ export function renderMCPResult(
 					expanded,
 					collapsedMaxLines: 4,
 					expandedMaxLines: 12,
-					styleLine: line => truncateToWidth(styleToolOutputLine(line, theme), contentWidth),
+					styleLine: line => clipCollapsed(styleToolOutputLine(line, theme), contentWidth, expanded),
 					showExpandHintWhenUncapped: true,
 				},
 				theme,
