@@ -378,17 +378,20 @@ if [ "$NO_PUSH" -eq 0 ] && [ "$PUSHED" -eq 0 ] \
 	if git merge-base --is-ancestor "origin/$BRANCH" HEAD; then
 		step "push $BRANCH to origin (updates fork)"
 		git push origin "$BRANCH"
-	elif git merge-base --is-ancestor "$UPSTREAM_REF" HEAD \
-		&& OLD_BASE=$(git merge-base "origin/$BRANCH" "$UPSTREAM_REF") \
-		&& [ -n "$OLD_BASE" ] \
-		&& diff <(git diff -U0 --no-color --no-ext-diff "$OLD_BASE" "$UPSTREAM_REF" | grep -v '^index \|^@@ ') \
-			<(git diff -U0 --no-color --no-ext-diff "origin/$BRANCH" HEAD | grep -v '^index \|^@@ ') >/dev/null; then
-		# Stale remote from an earlier rebase whose push never landed:
-		# the origin→HEAD change equals the old-base→upstream change
-		# (modulo hunk headers), so force-push loses no fork content.
-		step "push $BRANCH to origin (rebased, remote stale)"
-		git push --force-with-lease origin "$BRANCH"
-		PUSHED=1
+	elif git merge-base --is-ancestor "$UPSTREAM_REF" HEAD; then
+		# Diverged from origin/$BRANCH but rebased onto $UPSTREAM_REF: either a
+		# stale remote from an earlier rebase whose push never landed, or a
+		# manually resolved rebase (resolution ports change the tree, so an
+		# exact diff match is too strict). Safe to force-push with a lease when
+		# origin/$BRANCH holds no fork content missing from HEAD: every commit
+		# unique to the remote must already be an ancestor of HEAD.
+		if [ -z "$(git log --format=%H origin/"$BRANCH" --not HEAD | head -1)" ]; then
+			step "push $BRANCH to origin (rebased, remote stale)"
+			git push --force-with-lease origin "$BRANCH"
+			PUSHED=1
+		fi
+		# Fallthrough when origin/$BRANCH has commits HEAD lacks: pushing would
+		# lose fork content. Leave unpushed; the pull step below reports it.
 	fi
 fi
 
