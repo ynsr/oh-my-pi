@@ -191,6 +191,19 @@ git fetch --prune --no-tags origin "+refs/heads/main:refs/remotes/origin/main" "
 
 
 
+# NAPI-RS regenerates packages/natives/native/index.d.ts on every native
+# build (install-local.sh runs build:native); the drift is cosmetic (comment
+# reflow, declaration reorder) and upstream owns the file. Revert local-only
+# regeneration drift so the dirty gate below doesn't trip on it — but only
+# when the fork hasn't intentionally diverged it (HEAD matches upstream), so
+# a real fork change is never silently discarded.
+NATIVE_DTS="packages/natives/native/index.d.ts"
+if [ -n "$(git status --porcelain -- "$NATIVE_DTS")" ] \
+	&& [ -z "$(git diff "$UPSTREAM_REMOTE/$UPSTREAM_BRANCH" HEAD -- "$NATIVE_DTS")" ]; then
+	printf 'note: reverting regenerated %s (upstream-owned build artifact)\n' "$NATIVE_DTS"
+	git checkout -- "$NATIVE_DTS"
+fi
+
 if [ "$ALLOW_DIRTY" -eq 0 ] && [ -n "$(git status --porcelain)" ]; then
 	printf 'error: working tree is dirty; commit, stash, or pass --allow-dirty\n' >&2
 	git status --short >&2
