@@ -232,7 +232,11 @@ describe("AgentSession unexpected stop guard", () => {
 		// The signed reasoning stays in context so the continuation replays it.
 		const assistants = session.agent.state.messages.filter(message => message.role === "assistant");
 		expect(assistants[0]?.content).toEqual([
-			{ type: "thinking", thinking: "", thinkingSignature: "reasoning_content" },
+			{
+				type: "thinking",
+				thinking: "",
+				thinkingSignature: "reasoning_content",
+			},
 		]);
 	});
 
@@ -290,6 +294,121 @@ describe("AgentSession unexpected stop guard", () => {
 		expect(mock.calls).toHaveLength(2);
 		expect(assistantText(session.agent.state.messages)).toContain("build is green");
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
+	});
+	it("does not retry a smart-mode stop whose last line asks a question", async () => {
+		// A trailing `?` waits on the user: normal end of turn, never judged.
+		const smartSpy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(true);
+		const { session, mock } = await createHarness(
+			[unexpectedStop("Found a stale cache. Should I clear it and rerun?")],
+			{ "features.unexpectedStopDetection": "smart" },
+		);
+
+		await session.prompt("fix the failing test");
+		await session.waitForIdle();
+
+		expect(smartSpy).not.toHaveBeenCalled();
+		expect(mock.calls).toHaveLength(1);
+		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
+	});
+	it("does not retry a stop ending in an Arabic question mark", async () => {
+		// `؟` is the same wait-on-user signal as `?`, including for
+		// non-Latin text the old ASCII-only word check would have missed.
+		const arabicSpy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(true);
+		const { session: arabicSession, mock: arabicMock } = await createHarness(
+			[unexpectedStop("حافظه پنهان قدیمی است. آیا پاکش کنم؟")],
+			{
+				"features.unexpectedStopDetection": "smart",
+			},
+		);
+
+		await arabicSession.prompt("fix the failing test");
+		await arabicSession.waitForIdle();
+
+		expect(arabicSpy).not.toHaveBeenCalled();
+		expect(arabicMock.calls).toHaveLength(1);
+		expect(reminderMessages(arabicSession.agent.state.messages)).toHaveLength(0);
+	});
+	it("does not retry a stop ending in a fullwidth question mark", async () => {
+		// `？` (U+FF1F) is the same wait-on-user signal as `?` for CJK text.
+		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(true);
+		const { session, mock } = await createHarness([unexpectedStop("キャッシュが古いです。クリアしますか？")], {
+			"features.unexpectedStopDetection": "smart",
+		});
+
+		await session.prompt("fix the failing test");
+		await session.waitForIdle();
+
+		expect(spy).not.toHaveBeenCalled();
+		expect(mock.calls).toHaveLength(1);
+		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
+	});
+	it("does not retry a mechanical-mode stop whose last line asks a question", async () => {
+		// A visible question is a normal end of turn even though mechanical
+		// mode otherwise retries nothing visible without consulting the judge.
+		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(true);
+		const { session, mock } = await createHarness([
+			unexpectedStop("Two options:\n1. Keep the flag.\n2. Drop it.\nWhich one should I use?"),
+		]);
+
+		await session.prompt("do the thing");
+		await session.waitForIdle();
+
+		expect(spy).not.toHaveBeenCalled();
+		expect(mock.calls).toHaveLength(1);
+		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
+	});
+	it("still nudges when the stop ends mid-thought even with a quoted mid-text question", async () => {
+		// Only a trailing question counts: a `?` wrapped in quotes mid-text
+		// with a trailing colon is truncation, not waiting on the user.
+		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(false);
+		const { session, mock } = await createHarness([
+			unexpectedStop('One clarification before I rewire — did you mean "reset origin/main"? Continuing:'),
+			{ content: ["proceeding with the rewire"], stopReason: "stop" },
+		]);
+		spy.mockResolvedValue(false);
+
+		await session.prompt("do the thing");
+		await session.waitForIdle();
+
+		expect(spy).not.toHaveBeenCalled();
+		expect(mock.calls).toHaveLength(2);
+		expect(assistantText(session.agent.state.messages)).toContain("proceeding with the rewire");
+		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
+	});
+	it("still nudges when only an earlier sentence asks a question", async () => {
+		// A `?` answered mid-turn must not exempt a trailing promised action
+		// (smart verdict YES still nudges once). No `ing` heuristic needed:
+		// the `?` sits mid-text, not at the end, regardless of what follows.
+		const judgePrompts = stubJudgeVerdict("YES");
+		const { session, mock } = await createHarness(
+			[
+				unexpectedStop("Why is this slow? I see it now. Applying the fix next."),
+				unexpectedStop("That was the full answer; nothing more to add."),
+			],
+			{ "features.unexpectedStopDetection": "smart" },
+		);
+
+		await session.prompt("fix the parser bug");
+		await session.waitForIdle();
+
+		expect(judgePrompts).toHaveLength(1);
+		expect(mock.calls).toHaveLength(2);
+		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
+	});
+	it("still judges a bare question mark with no words", async () => {
+		// Bare punctuation is not a question: the guard stays out and the
+		// judge decides (NO verdict here ends the turn normally).
+		const judgePrompts = stubJudgeVerdict("NO");
+		const { session, mock } = await createHarness([unexpectedStop("?")], {
+			"features.unexpectedStopDetection": "smart",
+		});
+
+		await session.prompt("do the thing");
+		await session.waitForIdle();
+
+		expect(judgePrompts).toHaveLength(1);
+		expect(mock.calls).toHaveLength(1);
+		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
 	});
 
 	it("does not retry after a forced tool call", async () => {
@@ -466,7 +585,12 @@ describe("AgentSession unexpected stop guard", () => {
 	it("does not classify a stop whose reason is not stop", async () => {
 		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(true);
 		const { session, mock } = await createHarness(
-			[{ content: ["I should continue but hit the length limit"], stopReason: "length" }],
+			[
+				{
+					content: ["I should continue but hit the length limit"],
+					stopReason: "length",
+				},
+			],
 			{
 				"features.unexpectedStopDetection": "smart",
 			},

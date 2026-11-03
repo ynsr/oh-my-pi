@@ -96,6 +96,7 @@ import {
 import {
 	FORK_UNEXPECTED_STOP_TIMEOUT_MS,
 	forkHasTruncatedSuffix,
+	forkLastLineHasQuestion,
 	forkTurnRecoveryMaxRetries,
 	forkUnexpectedStopMaxRetries,
 } from "./turn-recovery-fork";
@@ -1201,7 +1202,12 @@ export class TurnRecovery {
 			.filter((content): content is TextContent => content.type === "text")
 			.map(content => content.text)
 			.join("\n");
-
+		// A trailing question asks the user for input or confirmation
+		// and waits on a reply: a normal end of turn in both modes, never judged.
+		if (forkLastLineHasQuestion(text)) {
+			this.#unexpectedStopRetryCount = 0;
+			return false;
+		}
 		// A thinking-only terminal turn has no visible assistant message, so both
 		// mechanical and smart modes retry it directly, whether or not the provider
 		// exposed its reasoning text. Only a non-truncated text turn is gated on the

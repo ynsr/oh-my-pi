@@ -38,7 +38,10 @@ export const cfgFeaturesTurnRecoveryMaxRetries = register({
  * - a 60s judge verdict budget (upstream: 15s) for gateway-routed judges;
  * - truncated-suffix detection: a text stop ending in `:` / `...` / `…`
  *   ended mid-thought and skips the mechanical/smart gates straight to the
- *   nudge.
+ *   nudge;
+ * - trailing-question detection: a text stop ending with a real question
+ *   (`?` / `؟` / `？`) asks the user for input or confirmation and ends the
+ *   turn normally in both modes, without consulting the judge.
  */
 
 /** Judge verdict budget. Upstream default is 15s; the fork allows 60s. */
@@ -52,6 +55,21 @@ export const FORK_UNEXPECTED_STOP_TIMEOUT_MS = 60_000;
 export function forkHasTruncatedSuffix(value: string): boolean {
 	const trimmed = value.trimEnd();
 	return trimmed.endsWith(":") || trimmed.endsWith("...") || trimmed.endsWith("…");
+}
+
+/**
+ * The turn ends by asking the user for input or confirmation: it waits on a
+ * reply, so it ends normally rather than stopping short. Only a trailing
+ * question counts — a `?`/`؟`/`？` from an earlier sentence the turn itself
+ * answered does not exempt a trailing promised action. Bare punctuation with
+ * no words (`?`, `` `?` ``) is not a question either.
+ */
+export function forkLastLineHasQuestion(value: string): boolean {
+	const trimmed = value.trimEnd().replace(/[\s"'`*)}\]]+$/g, "");
+	if (!trimmed.endsWith("?") && !trimmed.endsWith("؟") && !trimmed.endsWith("？")) return false;
+	const withoutMark = trimmed.slice(0, -1);
+	const lastSentence = withoutMark.split(/(?<=[.?!؟？])\s+/).pop() ?? withoutMark;
+	return /[\p{L}\p{N}]/u.test(lastSentence);
 }
 
 /** Configured unexpected-stop retry cap (default 20; 0 disables recovery). */
